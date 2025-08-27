@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 import os
 from livekit import agents
-from livekit.agents import AgentSession, Agent, RoomInputOptions
+from livekit.agents import AgentSession, Agent, RoomInputOptions, ConversationItemAddedEvent
 from livekit.plugins import (
     yandex,
     noise_cancellation,
@@ -34,6 +34,7 @@ async def entrypoint(ctx: agents.JobContext):
         tts=yandex.TTS(),
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
+        preemptive_generation=True
     )
 
     await session.start(
@@ -47,7 +48,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     await session.generate_reply(
         instructions="Поприветствуй пользователя"
-    )
+    )    
 
 
 if __name__ == "__main__":
