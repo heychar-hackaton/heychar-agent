@@ -23,7 +23,7 @@ This starter app is compatible with any [custom web/mobile frontend](https://doc
 Clone the repository and install dependencies to a virtual environment:
 
 ```console
-cd agent-starter-python
+cd heychar-agent
 uv sync
 ```
 
@@ -32,14 +32,13 @@ Set up the environment by copying `.env.example` to `.env.local` and filling in 
 - `LIVEKIT_URL`: Use [LiveKit Cloud](https://cloud.livekit.io/) or [run your own](https://docs.livekit.io/home/self-hosting/)
 - `LIVEKIT_API_KEY`
 - `LIVEKIT_API_SECRET`
-- `OPENAI_API_KEY`: [Get a key](https://platform.openai.com/api-keys) or use your [preferred LLM provider](https://docs.livekit.io/agents/integrations/llm/)
-- `DEEPGRAM_API_KEY`: [Get a key](https://console.deepgram.com/) or use your [preferred STT provider](https://docs.livekit.io/agents/integrations/stt/)
-- `CARTESIA_API_KEY`: [Get a key](https://play.cartesia.ai/keys) or use your [preferred TTS provider](https://docs.livekit.io/agents/integrations/tts/)
+- `YANDEX_API_KEY`
+- `YANDEX_FOLDER_ID`
 
 You can load the LiveKit environment automatically using the [LiveKit CLI](https://docs.livekit.io/home/cli/cli-setup):
 
 ```bash
-lk app env -w .env.local
+lk app env -w .env
 ```
 
 ## Run the agent

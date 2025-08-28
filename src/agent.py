@@ -1,7 +1,8 @@
 from dotenv import load_dotenv
 import os
+import time
 from livekit import agents
-from livekit.agents import AgentSession, Agent, RoomInputOptions, ConversationItemAddedEvent
+from livekit.agents import AgentSession, Agent, RoomInputOptions, ConversationItemAddedEvent, function_tool, RunContext
 from livekit.plugins import (
     yandex,
     noise_cancellation,
@@ -16,6 +17,7 @@ load_dotenv(".env")
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(instructions="Ты HR агент, проводишь собеседование кандидата на должность реакт разработчика. Все английские слова произносятся на русском языке в русской транскрипции.")
+        
 
 
 async def entrypoint(ctx: agents.JobContext):
