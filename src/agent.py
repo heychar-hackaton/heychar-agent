@@ -1,14 +1,17 @@
 import json
-import dotenv
 import os
+
+import dotenv
+
 import livekit
 import livekit.agents
 import livekit.plugins
+import livekit.plugins.elevenlabs
+import livekit.plugins.noise_cancellation
 import livekit.plugins.openai
-import livekit.plugins.yandex
 import livekit.plugins.silero
 import livekit.plugins.turn_detector
-import livekit.plugins.noise_cancellation
+import livekit.plugins.yandex
 
 dotenv.load_dotenv(".env")
 
@@ -47,6 +50,7 @@ async def entrypoint(ctx: livekit.agents.JobContext):
             api_key=api_key,
             model=model),
         tts=livekit.plugins.yandex.TTS(),
+        #tts=livekit.plugins.elevenlabs.TTS(model="eleven_v3"),
         vad=livekit.plugins.silero.VAD.load(),
         turn_detection='stt',
         preemptive_generation=True)
@@ -57,8 +61,8 @@ async def entrypoint(ctx: livekit.agents.JobContext):
         room_input_options=livekit.agents.RoomInputOptions(
             noise_cancellation=livekit.plugins.noise_cancellation.BVC()))
 
-    await session.generate_reply(instructions="Поприветствуй пользователя")
+    await session.generate_reply(instructions="Поприветствуй кандидата, если ты не знаешь, как его зовут, то спроси, как можно к нему обращаться.")
 
 
 if __name__ == "__main__":
-    livekit.agents.cli.run_app(livekit.agents.WorkerOptions(entrypoint_fnc=entrypoint))
+    livekit.agents.cli.run_app(livekit.agents.WorkerOptions(entrypoint_fnc=entrypoint, agent_name="heychar"))
