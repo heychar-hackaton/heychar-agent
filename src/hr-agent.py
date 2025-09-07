@@ -324,9 +324,12 @@ async def entrypoint(ctx: JobContext):
     """Точка входа для HR-агента - максимально простая версия"""
 
     logger.info(f"HR Agent запущен для job: {ctx.job.id}")
+    logger.info(f"Room name: {ctx.room.name}")
     logger.info(f"Metadata: {ctx.job.metadata}")
+    logger.info("Agent name: hr-agent")
 
     await ctx.connect(auto_subscribe=livekit.agents.AutoSubscribe.AUDIO_ONLY)
+    logger.info("Агент подключен к комнате")
 
     # Получаем номер телефона из metadata
     metadata = ctx.job.metadata
@@ -344,6 +347,42 @@ async def entrypoint(ctx: JobContext):
     phone_number = metadata.get("phone_number") if metadata else None
     yandex_api_key = metadata.get("yandex_api_key") if metadata else os.getenv("YANDEX_API_KEY")
     yandex_folder_id = metadata.get("yandex_folder_id") if metadata else os.getenv("YANDEX_FOLDER_ID")
+
+    # Создаем агента
+    model = f"gpt://{yandex_folder_id}/yandexgpt/latest"
+
+    session = livekit.agents.AgentSession(
+        stt=livekit.plugins.yandex.STT(language="ru-RU"),
+        llm=livekit.plugins.openai.LLM(
+            base_url="https://llm.api.cloud.yandex.net/v1",
+            api_key=yandex_api_key,
+            model=model),
+        tts=livekit.plugins.yandex.TTS(),
+        vad=livekit.plugins.silero.VAD.load(),
+        turn_detection='stt',
+        allow_interruptions=True,
+        min_interruption_words=3,
+        preemptive_generation=True)
+
+    # Создаем агента
+    agent = HRAgent(ctx)
+
+    # Добавляем обработчик событий участников
+    @ctx.room.on("participant_connected")
+    def on_participant_connected(participant):
+        logger.info(f"Участник подключился: {participant.identity}")
+
+    @ctx.room.on("participant_disconnected")
+    def on_participant_disconnected(participant):
+        logger.info(f"Участник отключился: {participant.identity}")
+
+    logger.info("Запускаем сессию агента...")
+    await session.start(
+        room=ctx.room,
+        agent=agent,
+        room_input_options=livekit.agents.RoomInputOptions(
+            noise_cancellation=livekit.plugins.noise_cancellation.BVC()))
+    logger.info("Сессия агента запущена успешно")
 
     # Если это исходящий звонок - делаем вызов
     sip_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID")
@@ -363,38 +402,32 @@ async def entrypoint(ctx: JobContext):
             )
 
             logger.info("SIP участник создан")
+            logger.info("Ждем подключения кандидата...")
+            await asyncio.sleep(2)
 
         except Exception as e:
             logger.error(f"Ошибка при создании SIP звонка: {e}")
             return
+    else:
+        # Для веб-подключения ждем участника в комнате
+        logger.info("Ожидаем подключения участника через веб-интерфейс...")
 
-    # Создаем простого агента (точно как в agent.py)
+        # Используем asyncio.Event для ожидания подключения участника
+        participant_connected = asyncio.Event()
 
-    model = f"gpt://{yandex_folder_id}/yandexgpt/latest"
+        def on_participant_connected_handler(participant):
+            logger.info(f"Участник подключился: {participant.identity}")
+            participant_connected.set()
 
-    session = livekit.agents.AgentSession(
-        stt=livekit.plugins.yandex.STT(language="ru-RU"),
-        llm=livekit.plugins.openai.LLM(
-            base_url="https://llm.api.cloud.yandex.net/v1",
-            api_key=yandex_api_key,
-            model=model),
-        tts=livekit.plugins.yandex.TTS(),
-        vad=livekit.plugins.silero.VAD.load(),
-        turn_detection='stt',
-        allow_interruptions=True,
-        min_interruption_words=3,
-        preemptive_generation=True)
+        # Добавляем обработчик для подключения участника
+        ctx.room.on("participant_connected", on_participant_connected_handler)
 
-    await session.start(
-        room=ctx.room,
-        agent=HRAgent(ctx),
-        room_input_options=livekit.agents.RoomInputOptions(
-            noise_cancellation=livekit.plugins.noise_cancellation.BVC()))
-
-    # Если это исходящий звонок - ждем подключения
-    if sip_trunk_id and phone_number:
-        logger.info("Ждем подключения кандидата...")
-        await asyncio.sleep(2)
+        # Ждем подключения участника с таймаутом
+        try:
+            await asyncio.wait_for(participant_connected.wait(), timeout=60.0)
+            logger.info("Участник успешно подключился!")
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут ожидания участника (60 секунд)")
 
     logger.info("Агент готов к интервью")
 
