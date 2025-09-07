@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, TypedDict
 
 import dotenv
 
@@ -26,56 +26,87 @@ from livekit.agents import (
 dotenv.load_dotenv(".env")
 logger = logging.getLogger("hr-agent")
 
-# Инструкции для HR-агента
-HR_INSTRUCTIONS = """
-Ты профессиональный HR-специалист, проводишь собеседование на русском языке по телефону.
-Все английские слова произноси в русской транскрипции.
 
-КОНТЕКСТ СОБЕСЕДОВАНИЯ:
-- Информация об организации: {company_info}
-- Вакансия: {job_description}  
-- Резюме кандидата: {candidate_resume}
+class CompanyInfo(TypedDict):
+    name: str
+    description: str
 
-СТРУКТУРА ИНТЕРВЬЮ (20-25 минут):
-1. Приветствие и знакомство
-2. Краткий рассказ кандидата о себе
-3. Проверка ключевых навыков из вакансии
-4. Поведенческие вопросы (работа в команде, стресс)
-5. Вопросы кандидата
-6. Завершение
 
-ВО ВРЕМЯ ИНТЕРВЬЮ:
-- Задавай уточняющие вопросы для конкретных примеров
-- Отслеживай соответствие ответов требованиям
-- Замечай противоречия и уклонения от вопросов
-- Будь дружелюбным, но профессиональным
+class JobInfo(TypedDict):
+    name: str
+    description: str
 
-После интервью создай отчет с оценкой соответствия позиции.
-"""
+
+class CandidateInfo(TypedDict):
+    name: str
+    description: str
+
+
+defaul_metadata = {
+    "company": {
+        "name": "ГК КАМИН",
+        "description": "Технологическая компания, разрабатывающая SaaS решения"
+    },
+    "job": {
+        "name": "Middle Python разработчик",
+        "description": "Middle Python разработчик. Требования: Python 3+ года, Django/FastAPI, PostgreSQL, опыт с REST API"
+    },
+    "candidate_resume": {
+        "name": "Иван Петров",
+        "description": "Иван Петров, 28 лет. Опыт: Backend разработчик 3 года, Python, Django, MySQL. Проекты: интернет-магазин, CRM система"
+    }
+}
+
 
 class HRAgent(Agent):
     """HR-агент для проведения собеседований по телефону - простая версия"""
 
     def __init__(self, ctx: JobContext):
-        metadata = json.loads(ctx.job.metadata)
-        org_text = metadata.get("company_info", "")
-        vacancy_text = metadata.get("job_description", "")
-        resume_text = metadata.get("candidate_resume", "")
+        metadata = json.loads(ctx.job.metadata) if ctx.job.metadata else defaul_metadata
+        company: CompanyInfo = metadata.get("company", {"name": "", "description": ""})
+        job: JobInfo = metadata.get("job", {"name": "", "description": ""})
+        candidate: CandidateInfo = metadata.get("candidate", {"name": "", "description": ""})
+
+        # Инициализируем атрибуты для оценки
+        self.evaluation_data = {
+            "technical_skills": {},
+            "soft_skills": {},
+            "red_flags": [],
+            "candidate_questions": [],
+            "start_time": time.time()
+        }
+        self.candidate_name = ""
+        self.phone_number = metadata.get("phone_number", "")
+        self.job_metadata = metadata
 
         instructions = f"""
-        Ты HR агент, проводишь собеседование кандидата на должность разработчика. 
-        Все английские слова произносятся на русском языке в русской транскрипции.
-        Будь дружелюбным и профессиональным. Задавай вопросы о опыте работы и навыках.
+        Ты HR агент по имени Анна, проводишь собеседование кандидата.
 
-        Контексты (не озвучивать, использовать для анализа):
-        [ОРГАНИЗАЦИЯ]
-        {org_text[:2000]}
+        НАЧНИ С ПРИВЕТСТВИЯ:
+        Поприветствуй кандидата, представься как Анна - HR-менеджер из компании {company['name']}. Скажи, что рада видеть его на собеседовании на позицию {job['name']}.
 
-        [ВАКАНСИЯ]
-        {vacancy_text[:4000]}
+        КОНТЕКСТ СОБЕСЕДОВАНИЯ:
+        - Информация об организации: {company['description']}
+        - Вакансия: {job['description']}
+        - Имя кандидата: {candidate['name']}
+        - Резюме кандидата: {candidate['description']}
 
-        [РЕЗЮМЕ]
-        {resume_text[:4000]}
+        СТРУКТУРА ИНТЕРВЬЮ (20-25 минут):
+        1. Приветствие и знакомство
+        2. Краткий рассказ кандидата о себе
+        3. Проверка ключевых навыков из вакансии
+        4. Поведенческие вопросы (работа в команде, стресс)
+        5. Вопросы кандидата
+        6. Завершение
+
+        ВО ВРЕМЯ ИНТЕРВЬЮ:
+        - Все английские слова произносятся на русском языке в русской транскрипции.
+        - Задавай уточняющие вопросы для конкретных примеров
+        - Отслеживай соответствие ответов требованиям
+        - Замечай противоречия и уклонения от вопросов
+        - Будь дружелюбным, но профессиональным
+
+        После интервью создай отчет с оценкой соответствия позиции.
 
         Запрещено:
         - переводить разговор/звонок оператору;
@@ -85,52 +116,12 @@ class HRAgent(Agent):
         Говорите вежливо, кратко, с уточняющими вопросами и просьбами привести конкретику (цифры, масштаб, роль).
 
         """
-
         super().__init__(
             instructions=instructions
         )
 
         logger.info("HRAgent инициализирован успешно")
 
-    def _create_llm(self):
-        """Создание LLM с Yandex GPT"""
-        api_key = os.getenv("YANDEX_API_KEY")
-        folder_id = os.getenv("YANDEX_FOLDER_ID")
-
-        if not api_key or not folder_id:
-            raise ValueError("YANDEX_API_KEY и YANDEX_FOLDER_ID должны быть установлены")
-
-        model = f"gpt://{folder_id}/yandexgpt/latest"
-
-        return livekit.plugins.openai.LLM(
-            base_url="https://llm.api.cloud.yandex.net/v1",
-            api_key=api_key,
-            model=model,
-            temperature=0.7
-        )
-
-    def _build_context(self, metadata: dict) -> livekit.agents.ChatContext:
-        """Построение контекста чата с информацией о вакансии"""
-        # Извлекаем данные из metadata
-        company_info = metadata.get("company_info", "Информация о компании не предоставлена")
-        job_description = metadata.get("job_description", "Описание вакансии не предоставлено")
-        candidate_resume = metadata.get("candidate_resume", "Резюме кандидата не предоставлено")
-
-        # Форматируем инструкции с контекстом
-        formatted_instructions = HR_INSTRUCTIONS.format(
-            company_info=company_info,
-            job_description=job_description,
-            candidate_resume=candidate_resume
-        )
-
-        chat_ctx = livekit.agents.ChatContext(
-            items=[livekit.agents.ChatMessage(
-                role='system',
-                content=[formatted_instructions]
-            )]
-        )
-
-        return chat_ctx
 
     @function_tool
     async def assess_technical_skill(
@@ -142,7 +133,7 @@ class HRAgent(Agent):
     ):
         """
         Оценить технический навык кандидата
-        
+
         Args:
             skill_name: название навыка (например, "Python", "SQL")
             claimed_level: заявленный уровень (Junior/Middle/Senior)
@@ -158,7 +149,6 @@ class HRAgent(Agent):
 
         logger.info(f"Оценен навык {skill_name}: {assessment}")
         return f"Навык {skill_name} оценён как {assessment}"
-
     @function_tool
     async def assess_soft_skill(
         self,
@@ -168,7 +158,7 @@ class HRAgent(Agent):
     ):
         """
         Оценить soft skill кандидата
-        
+
         Args:
             skill_name: название навыка (коммуникация, работа в команде)
             score: оценка от 1 до 10
@@ -182,12 +172,11 @@ class HRAgent(Agent):
 
         logger.info(f"Soft skill {skill_name}: {score}/10")
         return f"Soft skill {skill_name} оценён на {score} из 10"
-
     @function_tool
     async def add_red_flag(self, flag_description: str):
         """
         Отметить красный флаг
-        
+
         Args:
             flag_description: описание проблемы
         """
@@ -198,12 +187,11 @@ class HRAgent(Agent):
 
         logger.warning(f"Красный флаг: {flag_description}")
         return f"Отмечен красный флаг: {flag_description}"
-
     @function_tool
     async def note_candidate_question(self, question: str):
         """
         Записать вопрос кандидата
-        
+
         Args:
             question: вопрос от кандидата
         """
@@ -213,19 +201,17 @@ class HRAgent(Agent):
         })
 
         return f"Вопрос кандидата записан: {question}"
-
     @function_tool
     async def record_candidate_name(self, name: str):
         """
         Записать имя кандидата
-        
+
         Args:
             name: имя кандидата
         """
         self.candidate_name = name
         logger.info(f"Имя кандидата: {name}")
         return f"Записано имя кандидата: {name}"
-
     @function_tool
     async def end_interview(self):
         """
@@ -241,7 +227,9 @@ class HRAgent(Agent):
         await self._save_report(report)
 
         # Планируем отправку обратной связи
-        asyncio.create_task(self._send_feedback(report))
+        task = asyncio.create_task(self._send_feedback(report))
+        # Сохраняем ссылку на задачу для предотвращения предупреждений
+        _ = task
 
         return "Интервью завершено. Спасибо за время! Результаты будут отправлены в течение 3 дней."
 
@@ -338,7 +326,6 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"HR Agent запущен для job: {ctx.job.id}")
     logger.info(f"Metadata: {ctx.job.metadata}")
 
-    # Подключаемся к комнате (точно как в agent.py)
     await ctx.connect(auto_subscribe=livekit.agents.AutoSubscribe.AUDIO_ONLY)
 
     # Получаем номер телефона из metadata
@@ -352,7 +339,11 @@ async def entrypoint(ctx: JobContext):
     elif metadata is None:
         metadata = {}
 
+    logger.info(f"Metadata: {metadata}")
+
     phone_number = metadata.get("phone_number") if metadata else None
+    yandex_api_key = metadata.get("yandex_api_key") if metadata else os.getenv("YANDEX_API_KEY")
+    yandex_folder_id = metadata.get("yandex_folder_id") if metadata else os.getenv("YANDEX_FOLDER_ID")
 
     # Если это исходящий звонок - делаем вызов
     sip_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID")
@@ -378,28 +369,14 @@ async def entrypoint(ctx: JobContext):
             return
 
     # Создаем простого агента (точно как в agent.py)
-    try:
-        room_metadata = json.loads(raw_data) if (raw_data := ctx.room.metadata) else {}
-    except json.JSONDecodeError:
-        room_metadata = {}
 
-    if metadata_str := '\n'.join([f"{k}: {v}" for k, v in room_metadata.items()]):
-        chat_ctx = livekit.agents.ChatContext(
-            items=[livekit.agents.ChatMessage(
-                role='system',
-                content=[metadata_str])])
-    else:
-        chat_ctx = None
-
-    api_key = os.getenv("YANDEX_API_KEY")
-    folder_id = os.getenv("YANDEX_FOLDER_ID")
-    model = f"gpt://{folder_id}/yandexgpt/latest"
+    model = f"gpt://{yandex_folder_id}/yandexgpt/latest"
 
     session = livekit.agents.AgentSession(
         stt=livekit.plugins.yandex.STT(language="ru-RU"),
         llm=livekit.plugins.openai.LLM(
             base_url="https://llm.api.cloud.yandex.net/v1",
-            api_key=api_key,
+            api_key=yandex_api_key,
             model=model),
         tts=livekit.plugins.yandex.TTS(),
         vad=livekit.plugins.silero.VAD.load(),
@@ -414,12 +391,12 @@ async def entrypoint(ctx: JobContext):
         room_input_options=livekit.agents.RoomInputOptions(
             noise_cancellation=livekit.plugins.noise_cancellation.BVC()))
 
+    # Если это исходящий звонок - ждем подключения
+    if sip_trunk_id and phone_number:
+        logger.info("Ждем подключения кандидата...")
+        await asyncio.sleep(2)
 
-    logger.info("Отправляем приветствие")
-    await session.generate_reply(
-        instructions="Поприветствуй кандидата, если ты не знаешь, как его зовут, то спроси, как можно к нему обращаться.",
-        allow_interruptions=False
-    )
+    logger.info("Агент готов к интервью")
 
 def main():
     """Главная функция"""
@@ -455,14 +432,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Пример использования для создания dispatch:
-# lk dispatch create \
-#   --new-room \
-#   --agent-name hr-interviewer \
-#   --metadata '{
-#     "phone_number": "+71234567890",
-#     "company_info": "Технологическая компания, разрабатывающая SaaS решения",
-#     "job_description": "Middle Python разработчик. Требования: Python 3+ года, Django/FastAPI, PostgreSQL, опыт с REST API",
-#     "candidate_resume": "Иван Петров, 28 лет. Опыт: Backend разработчик 3 года, Python, Django, MySQL. Проекты: интернет-магазин, CRM система"
-#   }'
