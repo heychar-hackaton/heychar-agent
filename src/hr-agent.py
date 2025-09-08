@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Any, TypedDict
 
 import dotenv
+import httpx
+import openai
 
 import livekit
 import livekit.agents
@@ -394,17 +396,26 @@ async def entrypoint(ctx: JobContext):
     # Создаем компоненты в зависимости от провайдера
     if provider == "yandex" and api_key and folder_id:
         logger.info("Используем Яндекс провайдер")
-        stt = livekit.plugins.yandex.STT(language="ru-RU", api_key=api_key, folder_id=folder_id)
-        llm = livekit.plugins.openai.LLM(base_url="https://llm.api.cloud.yandex.net/v1", api_key=api_key, model=model)
+        stt = livekit.plugins.yandex.STT(
+            language="ru-RU", api_key=api_key, folder_id=folder_id
+        )
+        llm = livekit.plugins.openai.LLM(
+            base_url="https://llm.api.cloud.yandex.net/v1", api_key=api_key, model=model
+        )
         tts = livekit.plugins.yandex.TTS(api_key=api_key, folder_id=folder_id)
     else:
         logger.info("Используем OpenAI провайдер")
-        stt = livekit.plugins.openai.STT(model="gpt-4o-mini-transcribe", api_key=api_key)
-        llm = livekit.plugins.openai.LLM(model="gpt-4o-mini", api_key=api_key)
+        http_client = httpx.AsyncClient(proxy=f"socks5://{os.getenv("PROXY_SERVER")}:{os.getenv("PROXY_PORT")}")
+        openai_client = openai.AsyncClient(
+            api_key=api_key,
+            http_client=http_client
+        )
+        stt = livekit.plugins.openai.STT(model="gpt-4o-mini-transcribe", client=openai_client)
+        llm = livekit.plugins.openai.LLM(model="gpt-4o-mini", client=openai_client)
         tts = livekit.plugins.openai.TTS(
             model="gpt-4o-mini-tts",
             voice="shimmer",
-            api_key=api_key,
+            client=openai_client,
             instructions="Говори приветливо, дружелюбно, но по деловому. Говори без акцента, ведь ты идеально владеешь Русским языком",
         )
 
