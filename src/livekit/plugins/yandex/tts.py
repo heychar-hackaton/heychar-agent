@@ -1,27 +1,32 @@
 from __future__ import annotations
 
-import os
-import json
 import base64
+import json
+import os
 import uuid
-import aiohttp
-
 from dataclasses import dataclass
 from typing import Optional
 
+import aiohttp
+
+from livekit.agents._exceptions import APIError  # <-- ИСПРАВЛЕНО: корректный импорт
 from livekit.agents.tts.tts import (
     TTS as BaseTTS,
-    TTSCapabilities,
-    ChunkedStream as _BaseChunkedStream,
-    AudioEmitter,
 )
-from livekit.agents.types import APIConnectOptions, DEFAULT_API_CONNECT_OPTIONS
-from livekit.agents._exceptions import APIError  # <-- ИСПРАВЛЕНО: корректный импорт
+from livekit.agents.tts.tts import (
+    AudioEmitter,
+    TTSCapabilities,
+)
+from livekit.agents.tts.tts import (
+    ChunkedStream as _BaseChunkedStream,
+)
+from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions
 
 
 @dataclass
 class _TTSOptions:
     api_key: str
+    folder_id: str
     voice: str
     sample_rate: int = 24_000
     follow_redirects: bool = True
@@ -35,13 +40,23 @@ class TTS(BaseTTS):
     def __init__(
         self,
         *,
+        api_key: Optional[str] = None,
+        folder_id: Optional[str] = None,
         voice: str = "masha",
         sample_rate: int = 16_000,
         http_session: Optional[aiohttp.ClientSession] = None,
     ) -> None:
-        api_key = os.getenv("YANDEX_API_KEY")
+        # Получаем API ключ из параметра или переменной окружения
+        if api_key is None:
+            api_key = os.getenv("YANDEX_API_KEY")
         if not api_key:
-            raise RuntimeError("Переменная окружения YANDEX_API_KEY не установлена")
+            raise RuntimeError("Yandex TTS требует API ключ; установите YANDEX_API_KEY или передайте api_key явно")
+
+        # Получаем folder_id из параметра или переменной окружения
+        if folder_id is None:
+            folder_id = os.getenv("YANDEX_FOLDER_ID")
+        if not folder_id:
+            raise RuntimeError("Yandex TTS требует folder_id; установите YANDEX_FOLDER_ID или передайте folder_id явно")
 
         super().__init__(
             capabilities=TTSCapabilities(streaming=False),
@@ -51,11 +66,14 @@ class TTS(BaseTTS):
 
         self._opts = _TTSOptions(
             api_key=api_key,
+            folder_id=folder_id,
             voice=voice,
             sample_rate=sample_rate,
         )
         # берём общую сессию LiveKit, если не передали свою
-        from livekit.agents import utils as _utils  # локальный импорт, чтобы не тянуть при инициализации
+        from livekit.agents import (
+            utils as _utils,  # локальный импорт, чтобы не тянуть при инициализации
+        )
 
         self._session = http_session or _utils.http_context.http_session()
 
@@ -97,6 +115,7 @@ class _YandexRESTChunkedStream(_BaseChunkedStream):
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Api-Key {opts.api_key}",
+            "x-folder-id": opts.folder_id,
         }
 
         timeout = aiohttp.ClientTimeout(total=self._conn_options.timeout)

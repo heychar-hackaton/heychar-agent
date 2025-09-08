@@ -10,6 +10,7 @@ import dotenv
 
 import livekit
 import livekit.agents
+import livekit.plugins.elevenlabs
 import livekit.plugins.noise_cancellation
 import livekit.plugins.openai
 import livekit.plugins.silero
@@ -105,6 +106,10 @@ class HRAgent(Agent):
         - Отслеживай соответствие ответов требованиям
         - Замечай противоречия и уклонения от вопросов
         - Будь дружелюбным, но профессиональным
+
+        ПРОВЕРКА ПОДКЛЮЧЕНИЯ:
+        - Если пользователь не отвечает в течение нескольких секунд после подключения, используй функцию check_connection() для проверки связи
+        - Эта функция доступна только для веб-подключений, не для телефонных звонков
 
         После интервью создай отчет с оценкой соответствия позиции.
 
@@ -212,6 +217,14 @@ class HRAgent(Agent):
         self.candidate_name = name
         logger.info(f"Имя кандидата: {name}")
         return f"Записано имя кандидата: {name}"
+    @function_tool
+    async def check_connection(self):
+        """
+        Проверить подключение пользователя - спросить, слышно ли его
+        """
+        logger.info("Проверяем подключение пользователя...")
+        return "Привет! Слышно ли меня? Если да, то давайте начнем собеседование."
+
     @function_tool
     async def end_interview(self):
         """
@@ -342,27 +355,69 @@ async def entrypoint(ctx: JobContext):
     elif metadata is None:
         metadata = {}
 
-    logger.info(f"Metadata: {metadata}")
-
     phone_number = metadata.get("phone_number") if metadata else None
-    yandex_api_key = metadata.get("yandex_api_key") if metadata else os.getenv("YANDEX_API_KEY")
-    yandex_folder_id = metadata.get("yandex_folder_id") if metadata else os.getenv("YANDEX_FOLDER_ID")
 
-    # Создаем агента
-    model = f"gpt://{yandex_folder_id}/yandexgpt/latest"
+    # Получаем секреты из metadata или переменных окружения
+    provider = metadata.get("provider") or "yandex"
+    api_key = metadata.get("api_key") or os.getenv("YANDEX_API_KEY") or os.getenv("OPENAI_API_KEY")
+    folder_id = metadata.get("folder_id") or os.getenv("YANDEX_FOLDER_ID")
 
+    # Автоматически определяем провайдера по доступным секретам
+    if not metadata.get("provider"):
+        if os.getenv("YANDEX_API_KEY") and os.getenv("YANDEX_FOLDER_ID"):
+            provider = "yandex"
+            api_key = os.getenv("YANDEX_API_KEY")
+            folder_id = os.getenv("YANDEX_FOLDER_ID")
+        elif os.getenv("OPENAI_API_KEY"):
+            provider = "openai"
+            api_key = os.getenv("OPENAI_API_KEY")
+
+    logger.info(f"Провайдер: {provider}, API ключ: {'*' * (len(api_key) - 4) + api_key[-4:] if api_key else 'НЕ УСТАНОВЛЕН'}")
+    if folder_id:
+        logger.info(f"Folder ID: {folder_id}")
+
+    # Создаем модель в зависимости от провайдера
+    if provider == "yandex" and folder_id:
+        model = f"gpt://{folder_id}/yandexgpt/latest"
+    else:
+        model = "gpt-4o-mini"  # fallback на OpenAI
+
+    # Проверяем наличие необходимых секретов
+    if not api_key:
+        logger.error("API ключ не найден ни в metadata, ни в переменных окружения")
+        return
+
+    if provider == "yandex" and not folder_id:
+        logger.error("Для Яндекс провайдера необходим folder_id")
+        return
+
+    # Создаем компоненты в зависимости от провайдера
+    if provider == "yandex" and api_key and folder_id:
+        logger.info("Используем Яндекс провайдер")
+        stt = livekit.plugins.yandex.STT(language="ru-RU", api_key=api_key, folder_id=folder_id)
+        llm = livekit.plugins.openai.LLM(base_url="https://llm.api.cloud.yandex.net/v1", api_key=api_key, model=model)
+        tts = livekit.plugins.yandex.TTS(api_key=api_key, folder_id=folder_id)
+    else:
+        logger.info("Используем OpenAI провайдер")
+        stt = livekit.plugins.openai.STT(model="gpt-4o-mini-transcribe", api_key=api_key)
+        llm = livekit.plugins.openai.LLM(model="gpt-4o-mini", api_key=api_key)
+        tts = livekit.plugins.openai.TTS(
+            model="gpt-4o-mini-tts",
+            voice="shimmer",
+            api_key=api_key,
+            instructions="Говори приветливо, дружелюбно, но по деловому. Говори без акцента, ведь ты идеально владеешь Русским языком",
+        )
+
+    # Создаем сессию с общими настройками
     session = livekit.agents.AgentSession(
-        stt=livekit.plugins.yandex.STT(language="ru-RU"),
-        llm=livekit.plugins.openai.LLM(
-            base_url="https://llm.api.cloud.yandex.net/v1",
-            api_key=yandex_api_key,
-            model=model),
-        tts=livekit.plugins.yandex.TTS(),
+        stt=stt,
+        llm=llm,
+        tts=tts,
         vad=livekit.plugins.silero.VAD.load(),
         turn_detection='stt',
         allow_interruptions=True,
-        min_interruption_words=3,
-        preemptive_generation=True)
+        preemptive_generation=True
+    )
 
     # Создаем агента
     agent = HRAgent(ctx)
@@ -383,6 +438,22 @@ async def entrypoint(ctx: JobContext):
         room_input_options=livekit.agents.RoomInputOptions(
             noise_cancellation=livekit.plugins.noise_cancellation.BVC()))
     logger.info("Сессия агента запущена успешно")
+
+    # Функция для проверки подключения пользователя через 2 секунды
+    async def check_user_connection():
+        """Проверяет подключение пользователя через 2 секунды после подключения"""
+        await asyncio.sleep(2)  # Ждем 2 секунды
+
+        # Проверяем, есть ли участники в комнате (кроме агента)
+        participants = [p for p in ctx.room.remote_participants.values() if p.identity != "hr-agent"]
+
+        if participants:
+            logger.info("Проверяем подключение пользователя...")
+            try:
+                # Вызываем функцию проверки подключения
+                await agent.check_connection()
+            except Exception as e:
+                logger.error(f"Ошибка при проверке подключения: {e}")
 
     # Если это исходящий звонок - делаем вызов
     sip_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID")
@@ -426,6 +497,10 @@ async def entrypoint(ctx: JobContext):
         try:
             await asyncio.wait_for(participant_connected.wait(), timeout=60.0)
             logger.info("Участник успешно подключился!")
+
+            # Запускаем проверку подключения через 2 секунды для веб-версии
+            logger.info("Запускаем проверку подключения пользователя через 2 секунды...")
+            asyncio.create_task(check_user_connection())
         except asyncio.TimeoutError:
             logger.warning("Таймаут ожидания участника (60 секунд)")
 
@@ -440,20 +515,27 @@ def main():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    # Проверяем переменные окружения
+    # Проверяем обязательные переменные окружения
     required_env_vars = [
         "LIVEKIT_URL",
         "LIVEKIT_API_KEY",
         "LIVEKIT_API_SECRET",
-        "YANDEX_API_KEY",
-        "YANDEX_FOLDER_ID",
         "SIP_OUTBOUND_TRUNK_ID"
     ]
 
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
     if missing_vars:
-        logger.error(f"Отсутствуют переменные окружения: {missing_vars}")
+        logger.error(f"Отсутствуют обязательные переменные окружения: {missing_vars}")
         return
+
+    # Проверяем наличие хотя бы одного провайдера
+    yandex_available = os.getenv("YANDEX_API_KEY") and os.getenv("YANDEX_FOLDER_ID")
+    openai_available = os.getenv("OPENAI_API_KEY")
+
+    if not yandex_available and not openai_available:
+        logger.warning("Не настроен ни один AI провайдер. Агент будет использовать fallback настройки.")
+    else:
+        logger.info(f"Доступные провайдеры: Яндекс={yandex_available}, OpenAI={openai_available}")
 
     # Запускаем worker
     cli.run_app(

@@ -18,21 +18,21 @@ languages and audio formats【67005567507383†L540-L614】.
 
 from __future__ import annotations
 
-import asyncio
-from io import BytesIO
-from typing import List, Optional, Any
+from typing import Any, List, Optional
 
 try:
     # Alias the imported base STT class to ``BaseSTT`` so that our
     # provider class can be named ``STT`` without clobbering the import.
+    from livekit.agents.audio_frame import AudioFrame
     from livekit.agents.stt import (
         STT as BaseSTT,
-        STTCapabilities,
+    )
+    from livekit.agents.stt import (
+        SpeechAlternative,
         SpeechEvent,
         SpeechEventType,
-        SpeechAlternative,
+        STTCapabilities,
     )
-    from livekit.agents.audio_frame import AudioFrame
 except ImportError:  # pragma: no cover
     # If the LiveKit dependencies are not available (e.g. during local
     # development) we define minimal stand‑ins so the module can be
@@ -119,6 +119,7 @@ class STT(BaseSTT):
     def __init__(
         self,
         api_key: Optional[str] = None,
+        folder_id: Optional[str] = None,
         *,
         language: str = "en-US",
         model: str = "general",
@@ -136,6 +137,14 @@ class STT(BaseSTT):
                 "Yandex STT requires an API key; set YANDEX_API_KEY or pass api_key explicitly"
             )
 
+        # Resolve the folder_id from the environment if not provided.
+        if folder_id is None:
+            folder_id = os.getenv("YANDEX_FOLDER_ID")
+        if not folder_id:
+            raise ValueError(
+                "Yandex STT requires a folder_id; set YANDEX_FOLDER_ID or pass folder_id explicitly"
+            )
+
         # Determine whether to use gRPC.  By default (``None``) the plugin
         # will attempt to import ``grpc`` and the generated stubs.  If
         # either import fails the plugin falls back to REST.  When
@@ -146,7 +155,6 @@ class STT(BaseSTT):
         self._grpc_available = False
         if not self._disable_grpc:
             try:
-                import grpc  # type: ignore
                 # Attempt to import the compiled protobuf stubs.  These files
                 # must be generated from the Yandex Cloud ``stt.proto`` and
                 # ``stt_service.proto`` definitions (see the official
@@ -167,6 +175,7 @@ class STT(BaseSTT):
         self.audio_format = audio_format
         self.sample_rate = sample_rate
         self.api_key = api_key
+        self.folder_id = folder_id
         self._event_handlers = {}
 
     # ------------------------------------------------------------------
@@ -325,10 +334,8 @@ class STT(BaseSTT):
         }
         if self.audio_format == "lpcm":
             params["sampleRateHertz"] = str(sample_rate)
-        import os
-        folder_id = os.getenv("YANDEX_FOLDER_ID")
-        if folder_id:
-            params["folderId"] = folder_id
+        # Добавляем folder_id в параметры запроса
+        params["folderId"] = self.folder_id
         headers = {
             "Authorization": f"Api-Key {self.api_key}",
         }
@@ -344,7 +351,7 @@ class STT(BaseSTT):
         # Ensure ``confidence`` is a float (default to 1.0).  Some LiveKit
         # aggregates sum confidence scores; None causes a TypeError.
         try:
-            setattr(alternative, "confidence", 1.0)
+            alternative.confidence = 1.0
         except Exception:
             pass
         # Attach additional attributes expected by LiveKit on SpeechAlternative
@@ -502,7 +509,7 @@ class STT(BaseSTT):
         alternative = SpeechAlternative(text=final_text)
         # Ensure confidence is numeric
         try:
-            setattr(alternative, "confidence", 1.0)
+            alternative.confidence = 1.0
         except Exception:
             pass
         # Attach the same dynamic attributes as in the REST implementation
