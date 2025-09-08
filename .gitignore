@@ -13,3 +13,5 @@ KMS
 *.egg-info
 .pytest_cache
 .ruff_cache
+ss-config.json
+start-ss.sh

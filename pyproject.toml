@@ -16,6 +16,7 @@ dependencies = [
     "yandex-cloud-ml-sdk",
     "speechkit",
     "vosk==0.3.44",
+    "socksio",
 ]
 
 [dependency-groups]

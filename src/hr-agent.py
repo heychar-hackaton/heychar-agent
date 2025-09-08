@@ -219,13 +219,7 @@ class HRAgent(Agent):
         self.candidate_name = name
         logger.info(f"Имя кандидата: {name}")
         return f"Записано имя кандидата: {name}"
-    @function_tool
-    async def check_connection(self):
-        """
-        Проверить подключение пользователя - спросить, слышно ли его
-        """
-        logger.info("Проверяем подключение пользователя...")
-        return "Привет! Слышно ли меня? Если да, то давайте начнем собеседование."
+
 
     @function_tool
     async def end_interview(self):
@@ -340,7 +334,6 @@ async def entrypoint(ctx: JobContext):
 
     logger.info(f"HR Agent запущен для job: {ctx.job.id}")
     logger.info(f"Room name: {ctx.room.name}")
-    logger.info(f"Metadata: {ctx.job.metadata}")
     logger.info("Agent name: hr-agent")
 
     await ctx.connect(auto_subscribe=livekit.agents.AutoSubscribe.AUDIO_ONLY)
@@ -374,10 +367,6 @@ async def entrypoint(ctx: JobContext):
             provider = "openai"
             api_key = os.getenv("OPENAI_API_KEY")
 
-    logger.info(f"Провайдер: {provider}, API ключ: {'*' * (len(api_key) - 4) + api_key[-4:] if api_key else 'НЕ УСТАНОВЛЕН'}")
-    if folder_id:
-        logger.info(f"Folder ID: {folder_id}")
-
     # Создаем модель в зависимости от провайдера
     if provider == "yandex" and folder_id:
         model = f"gpt://{folder_id}/yandexgpt/latest"
@@ -405,17 +394,22 @@ async def entrypoint(ctx: JobContext):
         tts = livekit.plugins.yandex.TTS(api_key=api_key, folder_id=folder_id)
     else:
         logger.info("Используем OpenAI провайдер")
-        http_client = httpx.AsyncClient(proxy=f"socks5://{os.getenv("PROXY_SERVER")}:{os.getenv("PROXY_PORT")}")
+        proxy_server = os.getenv("PROXY_SERVER")
+        proxy_port = os.getenv("PROXY_PORT")
+        logger.info(f"======================Используем прокси: {proxy_server}:{proxy_port}")
+        http_client = httpx.AsyncClient(proxy=f"socks5://{proxy_server}:{proxy_port}")
+        #http_client = httpx.AsyncClient(proxy="socks5://46.17.63.140:8443",auth=("SwHf4uCIVHcjyMvOp50wNH"))
         openai_client = openai.AsyncClient(
             api_key=api_key,
             http_client=http_client
         )
-        stt = livekit.plugins.openai.STT(model="gpt-4o-mini-transcribe", client=openai_client)
-        llm = livekit.plugins.openai.LLM(model="gpt-4o-mini", client=openai_client)
+        stt = livekit.plugins.openai.STT(model="gpt-4o-mini-transcribe", client=openai_client, api_key=api_key)
+        llm = livekit.plugins.openai.LLM(model="gpt-4o-mini", client=openai_client, api_key=api_key)
         tts = livekit.plugins.openai.TTS(
             model="gpt-4o-mini-tts",
             voice="shimmer",
             client=openai_client,
+            api_key=api_key,
             instructions="Говори приветливо, дружелюбно, но по деловому. Говори без акцента, ведь ты идеально владеешь Русским языком",
         )
 
@@ -449,22 +443,6 @@ async def entrypoint(ctx: JobContext):
         room_input_options=livekit.agents.RoomInputOptions(
             noise_cancellation=livekit.plugins.noise_cancellation.BVC()))
     logger.info("Сессия агента запущена успешно")
-
-    # Функция для проверки подключения пользователя через 2 секунды
-    async def check_user_connection():
-        """Проверяет подключение пользователя через 2 секунды после подключения"""
-        await asyncio.sleep(2)  # Ждем 2 секунды
-
-        # Проверяем, есть ли участники в комнате (кроме агента)
-        participants = [p for p in ctx.room.remote_participants.values() if p.identity != "hr-agent"]
-
-        if participants:
-            logger.info("Проверяем подключение пользователя...")
-            try:
-                # Вызываем функцию проверки подключения
-                await agent.check_connection()
-            except Exception as e:
-                logger.error(f"Ошибка при проверке подключения: {e}")
 
     # Если это исходящий звонок - делаем вызов
     sip_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID")
@@ -508,10 +486,6 @@ async def entrypoint(ctx: JobContext):
         try:
             await asyncio.wait_for(participant_connected.wait(), timeout=60.0)
             logger.info("Участник успешно подключился!")
-
-            # Запускаем проверку подключения через 2 секунды для веб-версии
-            logger.info("Запускаем проверку подключения пользователя через 2 секунды...")
-            asyncio.create_task(check_user_connection())
         except asyncio.TimeoutError:
             logger.warning("Таймаут ожидания участника (60 секунд)")
 
