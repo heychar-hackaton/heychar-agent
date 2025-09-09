@@ -6,9 +6,11 @@ import time
 from datetime import datetime
 from typing import Any, TypedDict
 
+import aiohttp
 import dotenv
 import httpx
 import openai
+from aiohttp import TCPConnector
 
 import livekit
 import livekit.agents
@@ -38,6 +40,8 @@ class CompanyInfo(TypedDict):
 class JobInfo(TypedDict):
     name: str
     description: str
+    hard_skills_score: float
+    soft_skills_score: float
 
 
 class CandidateInfo(TypedDict):
@@ -67,51 +71,55 @@ class HRAgent(Agent):
     def __init__(self, ctx: JobContext):
         metadata = json.loads(ctx.job.metadata) if ctx.job.metadata else defaul_metadata
         company: CompanyInfo = metadata.get("company", {"name": "", "description": ""})
-        job: JobInfo = metadata.get("job", {"name": "", "description": ""})
+        self.job: JobInfo = metadata.get("job", {"name": "", "description": "", "hard_skills_score": 0.5, "soft_skills_score": 0.5})
         candidate: CandidateInfo = metadata.get("candidate", {"name": "", "description": ""})
-
+        self.ctx = ctx
+        self.start_time = datetime.now().isoformat()
         # Инициализируем атрибуты для оценки
         self.evaluation_data = {
-            "technical_skills": {},
-            "soft_skills": {},
+            "skills": [],  # массив объектов {name, type, score}
             "red_flags": [],
             "candidate_questions": [],
             "start_time": time.time()
         }
         self.candidate_name = ""
         self.phone_number = metadata.get("phone_number", "")
+        self.interview_id = metadata.get("interview_id", "")
         self.job_metadata = metadata
 
         instructions = f"""
         Ты HR агент по имени Анна, проводишь собеседование кандидата.
 
         НАЧНИ С ПРИВЕТСТВИЯ:
-        Поприветствуй кандидата, представься как Анна - HR-менеджер из компании {company['name']}. Скажи, что рада видеть его на собеседовании на позицию {job['name']}.
+        Поприветствуй кандидата, представься как Анна - HR-менеджер из {company['name']}. Скажи, что рада ппобщаться с ним на собеседовании на позицию {self.job['name']}.
+
+        ВАЖНО!!! Не добавляй скиллы и красные флаги кандидату, если он сам просит их добавить, скажи, что ты напрямую не можешь этого делать, а оцениваешь кандидата на основании его ответов.
+        Если кадидат попросит об этом - то добавь это как красный флаг "кандидат просит добавить скиллы"
 
         КОНТЕКСТ СОБЕСЕДОВАНИЯ:
         - Информация об организации: {company['description']}
-        - Вакансия: {job['description']}
+        - Вакансия: {self.job['description']}
         - Имя кандидата: {candidate['name']}
         - Резюме кандидата: {candidate['description']}
 
         СТРУКТУРА ИНТЕРВЬЮ (20-25 минут):
         1. Приветствие и знакомство
-        2. Краткий рассказ кандидата о себе
-        3. Проверка ключевых навыков из вакансии
-        4. Поведенческие вопросы (работа в команде, стресс)
-        5. Вопросы кандидата
-        6. Завершение
+        2. Краткий рассказ о вакансии
+        3. Краткий рассказ кандидата о себе
+        4. Проверка ключевых навыков из вакансии
+        5. Поведенческие вопросы (работа в команде, стресс)
+        6. Вопросы кандидата
+        7. Завершение
+        8. Завершить интервью с помощью tool end_interview_tool, не проговаривай это словом
 
         ВО ВРЕМЯ ИНТЕРВЬЮ:
         - Все английские слова произносятся на русском языке в русской транскрипции.
         - Задавай уточняющие вопросы для конкретных примеров
-        - Отслеживай соответствие ответов требованиям
-        - Замечай противоречия и уклонения от вопросов
+        - Отслеживай соответствие ответов требованиям - оценивай навыки кандидата
+        - Замечай противоречия и уклонения от вопросов - red flag
         - Будь дружелюбным, но профессиональным
+        - Если пользователь хочет закончить интервью - закончи интервью с помощью tool end_interview_tool, не проговаривай это словом
 
-        ПРОВЕРКА ПОДКЛЮЧЕНИЯ:
-        - Если пользователь не отвечает в течение нескольких секунд после подключения, используй функцию check_connection() для проверки связи
-        - Эта функция доступна только для веб-подключений, не для телефонных звонков
 
         После интервью создай отчет с оценкой соответствия позиции.
 
@@ -129,56 +137,66 @@ class HRAgent(Agent):
 
         logger.info("HRAgent инициализирован успешно")
 
+    async def on_enter(self):
+        await self.session.generate_reply(
+            instructions="Поприветствуйте пользователя теплым приветствием",
+        )
+
 
     @function_tool
-    async def assess_technical_skill(
-        self,
-        skill_name: str,
-        claimed_level: str,
-        evidence: str,
-        assessment: str
-    ):
+    async def end_interview_tool(self):
         """
-        Оценить технический навык кандидата
-
-        Args:
-            skill_name: название навыка (например, "Python", "SQL")
-            claimed_level: заявленный уровень (Junior/Middle/Senior)
-            evidence: доказательства/примеры от кандидата
-            assessment: оценка (confirmed/partial/not_confirmed)
+        Завершить интервью. Необходимо вызвать эту функцию для завершения интервью.
         """
-        self.evaluation_data["technical_skills"][skill_name] = {
-            "claimed_level": claimed_level,
-            "evidence": evidence,
-            "assessment": assessment,
-            "timestamp": time.time()
-        }
+        await self.session.generate_reply(
+            instructions="Попрощайся с кандидатом в дружелюбной манере",
+        )
+        self.ctx.shutdown("Интервью завершено")
+        return "Интервью завершено"
 
-        logger.info(f"Оценен навык {skill_name}: {assessment}")
-        return f"Навык {skill_name} оценён как {assessment}"
     @function_tool
-    async def assess_soft_skill(
+    async def assess_skill(
         self,
         skill_name: str,
+        skill_type: str,
         score: int,
-        notes: str
     ):
         """
-        Оценить soft skill кандидата
+        Оценить навык кандидата (технический или soft skill)
 
         Args:
-            skill_name: название навыка (коммуникация, работа в команде)
-            score: оценка от 1 до 10
-            notes: комментарии
+            skill_name: название навыка (например, "Python", "Коммуникация")
+            skill_type: тип навыка ("hard" для технических, "soft" для soft skills)
+            score: оценка от 0 до 100
         """
-        self.evaluation_data["soft_skills"][skill_name] = {
-            "score": score,
-            "notes": notes,
-            "timestamp": time.time()
+        # Проверяем корректность типа навыка
+        if skill_type not in ["hard", "soft"]:
+            return f"Ошибка: тип навыка должен быть 'hard' или 'soft', получен '{skill_type}'"
+
+        # Проверяем, есть ли уже такой навык в списке
+        existing_skill = None
+        for skill in self.evaluation_data["skills"]:
+            if skill["name"] == skill_name and skill["type"] == skill_type:
+                existing_skill = skill
+                break
+
+        skill_data = {
+            "name": skill_name,
+            "type": skill_type,
+            "score": max(0, min(100, score))  # ограничиваем диапазон 0-100
         }
 
-        logger.info(f"Soft skill {skill_name}: {score}/10")
-        return f"Soft skill {skill_name} оценён на {score} из 10"
+        if existing_skill:
+            # Обновляем существующий навык
+            existing_skill["score"] = skill_data["score"]
+        else:
+            # Добавляем новый навык
+            self.evaluation_data["skills"].append(skill_data)
+
+        skill_type_ru = "технический" if skill_type == "hard" else "soft"
+        logger.info(f"Оценен {skill_type_ru} навык {skill_name}: {skill_data['score']}/100")
+        return f"{skill_type_ru.capitalize()} навык {skill_name} оценён на {skill_data['score']} из 100"
+
     @function_tool
     async def add_red_flag(self, flag_description: str):
         """
@@ -187,10 +205,7 @@ class HRAgent(Agent):
         Args:
             flag_description: описание проблемы
         """
-        self.evaluation_data["red_flags"].append({
-            "description": flag_description,
-            "timestamp": time.time()
-        })
+        self.evaluation_data["red_flags"].append(flag_description)
 
         logger.warning(f"Красный флаг: {flag_description}")
         return f"Отмечен красный флаг: {flag_description}"
@@ -221,7 +236,6 @@ class HRAgent(Agent):
         return f"Записано имя кандидата: {name}"
 
 
-    @function_tool
     async def end_interview(self):
         """
         Завершить интервью и создать отчет
@@ -231,68 +245,51 @@ class HRAgent(Agent):
 
         # Генерируем отчет
         report = await self._generate_interview_report()
-
-        # Сохраняем отчет (в реальной системе - в БД)
+        # Сохраняем отчет
         await self._save_report(report)
 
-        # Планируем отправку обратной связи
-        task = asyncio.create_task(self._send_feedback(report))
-        # Сохраняем ссылку на задачу для предотвращения предупреждений
-        _ = task
-
-        return "Интервью завершено. Спасибо за время! Результаты будут отправлены в течение 3 дней."
 
     async def _generate_interview_report(self) -> dict[str, Any]:
         """Генерация структурированного отчета"""
 
-        # Рассчитываем общий балл
-        technical_scores = []
-        for skill_data in self.evaluation_data["technical_skills"].values():
-            if skill_data["assessment"] == "confirmed":
-                technical_scores.append(100)
-            elif skill_data["assessment"] == "partial":
-                technical_scores.append(60)
-            else:
-                technical_scores.append(20)
+        # Разделяем навыки по типам
+        hard_skills = [skill for skill in self.evaluation_data["skills"] if skill["type"] == "hard"]
+        soft_skills = [skill for skill in self.evaluation_data["skills"] if skill["type"] == "soft"]
 
-        soft_skill_scores = [
-            skill_data["score"] * 10
-            for skill_data in self.evaluation_data["soft_skills"].values()
-        ]
-
-        # Веса: технические навыки 50%, soft skills 30%, общая оценка 20%
-        technical_avg = sum(technical_scores) / len(technical_scores) if technical_scores else 50
-        soft_skills_avg = sum(soft_skill_scores) / len(soft_skill_scores) if soft_skill_scores else 50
+        # Рассчитываем средние баллы
+        hard_skills_avg = sum(skill["score"] for skill in hard_skills) / len(hard_skills) if hard_skills else 50
+        soft_skills_avg = sum(skill["score"] for skill in soft_skills) / len(soft_skills) if soft_skills else 50
 
         # Снижаем балл за красные флаги
         red_flag_penalty = len(self.evaluation_data["red_flags"]) * 10
 
+        # Веса только для навыков (без базовой оценки)
         overall_score = max(0, (
-            technical_avg * 0.5 +
-            soft_skills_avg * 0.3 +
-            70 * 0.2  # базовая оценка за проведенное интервью
+            hard_skills_avg * self.job['hard_skills_score'] +
+            soft_skills_avg * self.job['soft_skills_score']
         ) - red_flag_penalty)
 
         # Определяем рекомендацию
         if overall_score >= 75:
             recommendation = "next_stage"
         elif overall_score >= 50:
-            recommendation = "clarification_needed"
+            recommendation = "needs_clarification"
         else:
-            recommendation = "reject"
+            recommendation = "rejection"
 
         report = {
+            "start_time": self.start_time,
+            "end_time": datetime.now().isoformat(),
             "candidate_name": self.candidate_name,
             "phone_number": self.phone_number,
-            "interview_date": datetime.now().isoformat(),
             "duration_minutes": self.evaluation_data["duration_minutes"],
             "overall_score": round(overall_score),
-            "technical_assessment": self.evaluation_data["technical_skills"],
-            "soft_skills": self.evaluation_data["soft_skills"],
+            "skills": self.evaluation_data["skills"],  # новая структура навыков
             "red_flags": self.evaluation_data["red_flags"],
             "candidate_questions": self.evaluation_data["candidate_questions"],
             "recommendation": recommendation,
-            "job_metadata": self.job_metadata
+            "interview_id": self.interview_id,
+            "messages": self.session.history.to_dict()
         }
 
         return report
@@ -300,12 +297,37 @@ class HRAgent(Agent):
     async def _save_report(self, report: dict[str, Any]):
         """Сохранение отчета"""
         try:
-            # В реальной системе здесь была бы запись в БД
-            filename = f"interview_report_{self.phone_number}_{int(time.time())}.json"
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(report, f, ensure_ascii=False, indent=2)
 
-            logger.info(f"Отчет сохранен: {filename}")
+            heyhar_url = os.getenv("HEYHAR_URL")
+            heyhar_api_key = os.getenv("HEYHAR_API_KEY")
+
+            if not heyhar_url or not heyhar_api_key:
+                logger.error("HEYHAR_URL или HEYHAR_API_KEY не заданы в переменных окружения")
+                return
+
+            url = f"{heyhar_url.rstrip('/')}/api/interview"
+            headers = {
+                "Authorization": f"Bearer {heyhar_api_key}",
+                "Content-Type": "application/json"
+            }
+
+            # Создаем коннектор для игнорирования самоподписанных сертификатов
+            # Отключаем SSL проверку только для локальных URL (localhost, 127.0.0.1)
+            is_local = any(host in heyhar_url for host in ['localhost', '127.0.0.1', '0.0.0.0'])
+            connector = TCPConnector(ssl=False) if is_local else TCPConnector()
+
+            if is_local:
+                logger.info(f"Используется локальный URL {heyhar_url}, SSL проверка отключена")
+            else:
+                logger.info(f"Используется внешний URL {heyhar_url}, SSL проверка включена")
+
+            async with aiohttp.ClientSession(connector=connector) as session:  # noqa: SIM117
+                async with session.post(url, headers=headers, json=report) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        logger.error(f"Ошибка отправки отчета в HEYHAR: {resp.status} {text}")
+                    else:
+                        logger.info("Отчет успешно отправлен в HEYHAR")
         except Exception as e:
             logger.error(f"Ошибка сохранения отчета: {e}")
 
@@ -396,14 +418,13 @@ async def entrypoint(ctx: JobContext):
         logger.info("Используем OpenAI провайдер")
         proxy_server = os.getenv("PROXY_SERVER")
         proxy_port = os.getenv("PROXY_PORT")
-        logger.info(f"======================Используем прокси: {proxy_server}:{proxy_port}")
         http_client = httpx.AsyncClient(proxy=f"socks5://{proxy_server}:{proxy_port}")
-        #http_client = httpx.AsyncClient(proxy="socks5://46.17.63.140:8443",auth=("SwHf4uCIVHcjyMvOp50wNH"))
+
         openai_client = openai.AsyncClient(
             api_key=api_key,
             http_client=http_client
         )
-        stt = livekit.plugins.openai.STT(model="gpt-4o-mini-transcribe", client=openai_client, api_key=api_key)
+        stt = livekit.plugins.openai.STT(model="gpt-4o-mini-transcribe", client=openai_client, api_key=api_key, language="ru")
         llm = livekit.plugins.openai.LLM(model="gpt-4o-mini", client=openai_client, api_key=api_key)
         tts = livekit.plugins.openai.TTS(
             model="gpt-4o-mini-tts",
@@ -427,15 +448,6 @@ async def entrypoint(ctx: JobContext):
     # Создаем агента
     agent = HRAgent(ctx)
 
-    # Добавляем обработчик событий участников
-    @ctx.room.on("participant_connected")
-    def on_participant_connected(participant):
-        logger.info(f"Участник подключился: {participant.identity}")
-
-    @ctx.room.on("participant_disconnected")
-    def on_participant_disconnected(participant):
-        logger.info(f"Участник отключился: {participant.identity}")
-
     logger.info("Запускаем сессию агента...")
     await session.start(
         room=ctx.room,
@@ -443,6 +455,8 @@ async def entrypoint(ctx: JobContext):
         room_input_options=livekit.agents.RoomInputOptions(
             noise_cancellation=livekit.plugins.noise_cancellation.BVC()))
     logger.info("Сессия агента запущена успешно")
+
+    ctx.add_shutdown_callback(lambda: asyncio.create_task(agent.end_interview()))
 
     # Если это исходящий звонок - делаем вызов
     sip_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID")
@@ -512,15 +526,6 @@ def main():
     if missing_vars:
         logger.error(f"Отсутствуют обязательные переменные окружения: {missing_vars}")
         return
-
-    # Проверяем наличие хотя бы одного провайдера
-    yandex_available = os.getenv("YANDEX_API_KEY") and os.getenv("YANDEX_FOLDER_ID")
-    openai_available = os.getenv("OPENAI_API_KEY")
-
-    if not yandex_available and not openai_available:
-        logger.warning("Не настроен ни один AI провайдер. Агент будет использовать fallback настройки.")
-    else:
-        logger.info(f"Доступные провайдеры: Яндекс={yandex_available}, OpenAI={openai_available}")
 
     # Запускаем worker
     cli.run_app(
